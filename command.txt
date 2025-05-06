@@ -1,0 +1,1 @@
+g++ main.cpp src/glad.c src/shader.cpp -o main -I./include -lglfw3 -lopengl32 -lgdi32
