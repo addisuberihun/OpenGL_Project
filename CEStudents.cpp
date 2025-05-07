@@ -12,6 +12,17 @@
 #include <cmath>
 #include <algorithm>
 
+// Include Assimp headers
+#include <assimp/Importer.hpp>
+#include <assimp/scene.h>
+#include <assimp/postprocess.h>
+#include "include/model_loader.h"
+
+// Additional libraries for realistic environment
+#include <bullet/btBulletDynamicsCommon.h>
+#include <noise/noise.h>
+#include <stb_image.h>
+
 // Window settings
 const unsigned int SCR_WIDTH = 1280;
 const unsigned int SCR_HEIGHT = 720;
@@ -40,7 +51,19 @@ const float TRACK_LENGTH = 50.0f;
 const float TRACK_SPACING = 0.5f;
 const float TOTAL_WIDTH = NUM_TRACKS * TRACK_WIDTH + (NUM_TRACKS - 1) * TRACK_SPACING;
 
-// Student structure
+// Forward declarations
+class Model;
+
+// Define the HumanModel struct before Student
+struct HumanModel {
+    Model model;
+    bool loaded;
+    unsigned int faceTexture;
+    
+    HumanModel() : loaded(false), faceTexture(0) {}
+};
+
+// Now the Student struct can use HumanModel
 struct Student {
     std::string name;
     int trackNumber;
@@ -51,6 +74,18 @@ struct Student {
     glm::vec3 color;
     float finishTime;
     bool finished;
+    HumanModel humanModel;
+    
+    Student() : 
+        name(""), 
+        trackNumber(0), 
+        position(0.0f), 
+        speed(1.0f), 
+        color(1.0f, 1.0f, 1.0f), 
+        finishTime(0.0f), 
+        finished(false),
+        legPhase(0.0f),
+        armPhase(0.0f) {}
 };
 
 // Text rendering
@@ -64,11 +99,38 @@ struct Character {
     unsigned int Advance;
 };
 
+// Environment settings
+const float GRAVITY = -9.81f;
+const float TERRAIN_SIZE = 100.0f;
+const float TERRAIN_HEIGHT = 10.0f;
+const int TERRAIN_RESOLUTION = 128;
+
+// Skybox settings
+const bool ENABLE_SKYBOX = true;
+const bool ENABLE_DYNAMIC_WEATHER = true;
+
+// Physics world
+btDiscreteDynamicsWorld* dynamicsWorld;
+btRigidBody* groundRigidBody;
+std::vector<btRigidBody*> studentRigidBodies;
+
+// Environment textures
+unsigned int terrainTexture;
+unsigned int grassTexture;
+unsigned int skyboxTexture;
+unsigned int rainTexture;
+
+// Weather system
+enum WeatherType { SUNNY, CLOUDY, RAINY, FOGGY };
+WeatherType currentWeather = SUNNY;
+float weatherIntensity = 0.0f;
+float weatherChangeTime = 0.0f;
+
 // Function prototypes
 void framebuffer_size_callback(GLFWwindow* window, int width, int height);
 void mouse_callback(GLFWwindow* window, double xpos, double ypos);
 void scroll_callback(GLFWwindow* window, double xoffset, double yoffset);
-void processInput(GLFWwindow* window);
+void processInput(GLFWwindow* window, std::vector<Student>& students);
 unsigned int createShaderProgram();
 unsigned int createTextShaderProgram();
 void renderText(unsigned int shader, std::string text, float x, float y, float scale, glm::vec3 color);
@@ -80,6 +142,18 @@ unsigned int createSkybox();
 void renderStudent(unsigned int shader, Student& student, float time);
 void initializeStudents(std::vector<Student>& students);
 void drawCube();
+void loadHumanModels(std::vector<Student>& students);
+void initPhysics();
+void cleanupPhysics();
+void updatePhysics(float deltaTime);
+unsigned int createTerrain();
+void renderEnvironment(unsigned int shader, float time);
+void updateWeather(float time);
+void renderWeatherEffects(unsigned int shader, float time);
+unsigned int loadTexture(const char* path);
+void initializeEnvironment();
+void renderScene(unsigned int shader, float currentTime);
+void renderSkybox(unsigned int shader);
 
 // Race state
 bool raceStarted = false;
@@ -178,6 +252,7 @@ int main() {
     // Create shader programs
     unsigned int shaderProgram = createShaderProgram();
     unsigned int textShaderProgram = createTextShaderProgram();
+    unsigned int skyboxShader = createShaderProgram(); // Use same shader for simplicity
 
     // Load fonts
     loadFonts();
@@ -187,9 +262,15 @@ int main() {
     unsigned int groundVAO = createGround();
     unsigned int skyboxVAO = createSkybox();
 
+    // Initialize environment
+    initializeEnvironment();
+
     // Initialize students
-    std::vector<Student> students(NUM_STUDENTS);
+    std::vector<Student> students;
     initializeStudents(students);
+
+    // Load human models
+    loadHumanModels(students);
 
     // Render loop
     while (!glfwWindowShouldClose(window)) {
@@ -199,7 +280,7 @@ int main() {
         lastFrame = currentFrame;
 
         // Process input
-        processInput(window);
+        processInput(window, students);
 
         // Clear the color and depth buffer
         glClearColor(0.1f, 0.1f, 0.2f, 1.0f);
@@ -216,22 +297,12 @@ int main() {
         glUniformMatrix4fv(glGetUniformLocation(shaderProgram, "view"), 1, GL_FALSE, glm::value_ptr(view));
         glUniformMatrix4fv(glGetUniformLocation(shaderProgram, "projection"), 1, GL_FALSE, glm::value_ptr(projection));
 
-        // Render ground
-        glm::mat4 model = glm::mat4(1.0f);
-        glUniformMatrix4fv(glGetUniformLocation(shaderProgram, "model"), 1, GL_FALSE, glm::value_ptr(model));
-        glUniform3f(glGetUniformLocation(shaderProgram, "objectColor"), 0.3f, 0.3f, 0.3f);
-        glBindVertexArray(groundVAO);
-        glDrawArrays(GL_TRIANGLES, 0, 6);
-
-        // Render skybox
-        glUniformMatrix4fv(glGetUniformLocation(shaderProgram, "model"), 1, GL_FALSE, glm::value_ptr(model));
-        glUniform3f(glGetUniformLocation(shaderProgram, "objectColor"), 0.5f, 0.7f, 0.9f);
-        glBindVertexArray(skyboxVAO);
-        glDrawArrays(GL_TRIANGLES, 0, 36);
+        // Render environment
+        renderScene(shaderProgram, currentFrame);
 
         // Render tracks
         for (int i = 0; i < NUM_TRACKS; i++) {
-            model = glm::mat4(1.0f);
+            glm::mat4 model = glm::mat4(1.0f);
             float xPos = -TOTAL_WIDTH / 2.0f + i * (TRACK_WIDTH + TRACK_SPACING);
             model = glm::translate(model, glm::vec3(xPos, 0.01f, 0.0f));
             model = glm::scale(model, glm::vec3(TRACK_WIDTH, 0.01f, TRACK_LENGTH));
@@ -293,6 +364,9 @@ int main() {
     glDeleteBuffers(1, &textVBO);
     glDeleteProgram(shaderProgram);
     glDeleteProgram(textShaderProgram);
+    
+    // Clean up physics
+    cleanupPhysics();
 
     glfwTerminate();
     return 0;
@@ -341,10 +415,11 @@ void scroll_callback(GLFWwindow* window, double xoffset, double yoffset) {
         cameraSpeed = 0.2f;
 }
 
-void processInput(GLFWwindow* window) {
+void processInput(GLFWwindow* window, std::vector<Student>& students) {
     if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS)
         glfwSetWindowShouldClose(window, true);
 
+    // Camera movement controls (existing code)
     float speed = cameraSpeed * deltaTime * 10.0f;
     if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS)
         cameraPos += speed * cameraFront;
@@ -358,6 +433,40 @@ void processInput(GLFWwindow* window) {
         cameraPos += cameraUp * speed;
     if (glfwGetKey(window, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS)
         cameraPos -= cameraUp * speed;
+    
+    // Race control keys
+    static bool spacePressed = false;
+    if (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS) {
+        if (!spacePressed) {
+            spacePressed = true;
+            
+            // Toggle race state
+            if (!raceStarted) {
+                // Start race
+                raceStarted = true;
+                raceStartTime = static_cast<float>(glfwGetTime());
+                std::cout << "Race started!" << std::endl;
+            } else if (!raceFinished) {
+                // Pause race
+                raceStarted = false;
+                std::cout << "Race paused!" << std::endl;
+            }
+        }
+    } else {
+        spacePressed = false;
+    }
+    
+    // Reset race with R key
+    static bool rPressed = false;
+    if (glfwGetKey(window, GLFW_KEY_R) == GLFW_PRESS) {
+        if (!rPressed) {
+            rPressed = true;
+            resetRace(students); // Now passing the students vector as parameter
+            std::cout << "Race reset!" << std::endl;
+        }
+    } else {
+        rPressed = false;
+    }
 }
 
 unsigned int createShaderProgram() {
@@ -365,9 +474,11 @@ unsigned int createShaderProgram() {
         #version 330 core
         layout (location = 0) in vec3 aPos;
         layout (location = 1) in vec3 aNormal;
+        layout (location = 2) in vec2 aTexCoords;
 
         out vec3 FragPos;
         out vec3 Normal;
+        out vec2 TexCoords;
 
         uniform mat4 model;
         uniform mat4 view;
@@ -375,7 +486,8 @@ unsigned int createShaderProgram() {
 
         void main() {
             FragPos = vec3(model * vec4(aPos, 1.0));
-            Normal = mat3(transpose(inverse(model))) * aNormal;  
+            Normal = mat3(transpose(inverse(model))) * aNormal;
+            TexCoords = aTexCoords;
             gl_Position = projection * view * vec4(FragPos, 1.0);
         }
     )";
@@ -386,10 +498,13 @@ unsigned int createShaderProgram() {
 
         in vec3 FragPos;
         in vec3 Normal;
+        in vec2 TexCoords;
 
         uniform vec3 objectColor;
         uniform vec3 lightPos;
         uniform vec3 viewPos;
+        uniform sampler2D faceTexture;
+        uniform int hasCustomFace;
 
         void main() {
             // Ambient
@@ -403,12 +518,20 @@ unsigned int createShaderProgram() {
             
             // Specular
             float specularStrength = 0.5;
-            vec3 viewDir = normalize(vec3(0.0, 0.0, 0.0) - FragPos);
+            vec3 viewDir = normalize(viewPos - FragPos);
             vec3 reflectDir = reflect(-lightDir, Normal);
             float spec = pow(max(dot(viewDir, reflectDir), 0.0), 32);
             vec3 specular = specularStrength * spec * vec3(1.0, 1.0, 1.0);
             
-            vec3 result = (ambient + diffuse + specular) * objectColor;
+            vec3 result;
+            if (hasCustomFace > 0 && TexCoords.y > 0.7) {
+                // Apply face texture to the head area
+                vec4 texColor = texture(faceTexture, TexCoords);
+                result = (ambient + diffuse + specular) * mix(objectColor, texColor.rgb, texColor.a);
+            } else {
+                result = (ambient + diffuse + specular) * objectColor;
+            }
+            
             FragColor = vec4(result, 1.0);
         }
     )";
@@ -635,413 +758,20 @@ void loadFonts() {
 }
 
 void renderText(unsigned int shader, std::string text, float x, float y, float scale, glm::vec3 color) {
-    if (!fontLoaded && Characters.empty()) {
+    if (Characters.empty()) {
         // Font failed to load, don't try to render text
         return;
     }
     
     // Activate corresponding render state
-    glUseProgram(shader);
-    glUniform3f(glGetUniformLocation(shader, "textColor"), color.x, color.y, color.z);
-    glActiveTexture(GL_TEXTURE0);
-    glBindVertexArray(textVAO);
-
-    // Set identity matrices for view and model
-    glm::mat4 view = glm::mat4(1.0f);
-    glm::mat4 model = glm::mat4(1.0f);
-    glUniformMatrix4fv(glGetUniformLocation(shader, "view"), 1, GL_FALSE, glm::value_ptr(view));
-    glUniformMatrix4fv(glGetUniformLocation(shader, "model"), 1, GL_FALSE, glm::value_ptr(model));
-
-    // Iterate through all characters
-    std::string::const_iterator c;
-    for (c = text.begin(); c != text.end(); c++) {
-        Character ch = Characters[*c];
-
-        float xpos = x + ch.Bearing.x * scale;
-        float ypos = y - (ch.Size.y - ch.Bearing.y) * scale;
-
-        float w = ch.Size.x * scale;
-        float h = ch.Size.y * scale;
-        // Update VBO for each character
-        float vertices[6][4] = {
-            { xpos,     ypos + h,   0.0f, 0.0f },
-            { xpos,     ypos,       0.0f, 1.0f },
-            { xpos + w, ypos,       1.0f, 1.0f },
-
-            { xpos,     ypos + h,   0.0f, 0.0f },
-            { xpos + w, ypos,       1.0f, 1.0f },
-            { xpos + w, ypos + h,   1.0f, 0.0f }
-        };
-        // Render glyph texture over quad
-        glBindTexture(GL_TEXTURE_2D, ch.TextureID);
-        // Update content of VBO memory
-        glBindBuffer(GL_ARRAY_BUFFER, textVBO);
-        glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(vertices), vertices);
-        glBindBuffer(GL_ARRAY_BUFFER, 0);
-        // Render quad
-        glDrawArrays(GL_TRIANGLES, 0, 6);
-        // Now advance cursors for next glyph
-        x += (ch.Advance >> 6) * scale;
-    }
-    glBindVertexArray(0);
-    glBindTexture(GL_TEXTURE_2D, 0);
-}
-
-void renderText3D(unsigned int shader, std::string text, glm::vec3 position, float scale, glm::vec3 color) {
-    if (!fontLoaded && Characters.empty()) {
-        // Font failed to load, don't try to render text
-        return;
-    }
     
-    // Activate corresponding render state
-    glUseProgram(shader);
-    glUniform3f(glGetUniformLocation(shader, "textColor"), color.x, color.y, color.z);
-    glActiveTexture(GL_TEXTURE0);
-    glBindVertexArray(textVAO);
 
-    // Calculate billboard model matrix
-    glm::mat4 view = glm::lookAt(cameraPos, cameraPos + cameraFront, cameraUp);
-    glm::mat4 model = glm::mat4(1.0f);
-    model = glm::translate(model, position);
-    // Billboard effect - extract rotation from view matrix
-    model[0][0] = view[0][0];
-    model[0][1] = view[1][0];
-    model[0][2] = view[2][0];
-    model[1][0] = view[0][1];
-    model[1][1] = view[1][1];
-    model[1][2] = view[2][1];
-    model[2][0] = view[0][2];
-    model[2][1] = view[1][2];
-    model[2][2] = view[2][2];
-    
-    glUniformMatrix4fv(glGetUniformLocation(shader, "view"), 1, GL_FALSE, glm::value_ptr(view));
-    glUniformMatrix4fv(glGetUniformLocation(shader, "model"), 1, GL_FALSE, glm::value_ptr(model));
 
-    // Calculate text width for centering
-    float textWidth = 0.0f;
-    std::string::const_iterator c;
-    for (c = text.begin(); c != text.end(); c++) {
-        Character ch = Characters[*c];
-        textWidth += (ch.Advance >> 6) * scale;
-    }
-    
-    // Start position (centered)
-    float x = -textWidth / 2.0f;
-    float y = 0.0f;
 
-    // Iterate through all characters
-    for (c = text.begin(); c != text.end(); c++) {
-        Character ch = Characters[*c];
 
-        float xpos = x + ch.Bearing.x * scale;
-        float ypos = y - (ch.Size.y - ch.Bearing.y) * scale;
 
-        float w = ch.Size.x * scale;
-        float h = ch.Size.y * scale;
-        // Update VBO for each character
-        float vertices[6][4] = {
-            { xpos,     ypos + h,   0.0f, 0.0f },
-            { xpos,     ypos,       0.0f, 1.0f },
-            { xpos + w, ypos,       1.0f, 1.0f },
 
-            { xpos,     ypos + h,   0.0f, 0.0f },
-            { xpos + w, ypos,       1.0f, 1.0f },
-            { xpos + w, ypos + h,   1.0f, 0.0f }
-        };
-        // Render glyph texture over quad
-        glBindTexture(GL_TEXTURE_2D, ch.TextureID);
-        // Update content of VBO memory
-        glBindBuffer(GL_ARRAY_BUFFER, textVBO);
-        glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(vertices), vertices);
-        glBindBuffer(GL_ARRAY_BUFFER, 0);
-        // Render quad
-        glDrawArrays(GL_TRIANGLES, 0, 6);
-        // Now advance cursors for next glyph
-        x += (ch.Advance >> 6) * scale;
-    }
-    glBindVertexArray(0);
-    glBindTexture(GL_TEXTURE_2D, 0);
-}
 
-unsigned int createTrack() {
-    float vertices[] = {
-        // positions          // normals
-        -0.5f, 0.0f, -0.5f,   0.0f, 1.0f, 0.0f,
-         0.5f, 0.0f, -0.5f,   0.0f, 1.0f, 0.0f,
-         0.5f, 0.0f,  0.5f,   0.0f, 1.0f, 0.0f,
-         0.5f, 0.0f,  0.5f,   0.0f, 1.0f, 0.0f,
-        -0.5f, 0.0f,  0.5f,   0.0f, 1.0f, 0.0f,
-        -0.5f, 0.0f, -0.5f,   0.0f, 1.0f, 0.0f
-    };
-
-    unsigned int VAO, VBO;
-    glGenVertexArrays(1, &VAO);
-    glGenBuffers(1, &VBO);
-
-    glBindVertexArray(VAO);
-    glBindBuffer(GL_ARRAY_BUFFER, VBO);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
-
-    // Position attribute
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)0);
-    glEnableVertexAttribArray(0);
-    // Normal attribute
-    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)(3 * sizeof(float)));
-    glEnableVertexAttribArray(1);
-
-    return VAO;
-}
-
-unsigned int createGround() {
-    float vertices[] = {
-        // positions          // normals
-        -50.0f, 0.0f, -50.0f,   0.0f, 1.0f, 0.0f,
-         50.0f, 0.0f, -50.0f,   0.0f, 1.0f, 0.0f,
-         50.0f, 0.0f,  50.0f,   0.0f, 1.0f, 0.0f,
-         50.0f, 0.0f,  50.0f,   0.0f, 1.0f, 0.0f,
-        -50.0f, 0.0f,  50.0f,   0.0f, 1.0f, 0.0f,
-        -50.0f, 0.0f, -50.0f,   0.0f, 1.0f, 0.0f
-    };
-
-    unsigned int VAO, VBO;
-    glGenVertexArrays(1, &VAO);
-    glGenBuffers(1, &VBO);
-
-    glBindVertexArray(VAO);
-    glBindBuffer(GL_ARRAY_BUFFER, VBO);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
-
-    // Position attribute
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)0);
-    glEnableVertexAttribArray(0);
-    // Normal attribute
-    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)(3 * sizeof(float)));
-    glEnableVertexAttribArray(1);
-
-    return VAO;
-}
-
-unsigned int createSkybox() {
-    float vertices[] = {
-        // positions          // normals
-        -50.0f,  50.0f, -50.0f,   0.0f, 0.0f, 1.0f,
-        -50.0f, -50.0f, -50.0f,   0.0f, 0.0f, 1.0f,
-         50.0f, -50.0f, -50.0f,   0.0f, 0.0f, 1.0f,
-         50.0f, -50.0f, -50.0f,   0.0f, 0.0f, 1.0f,
-         50.0f,  50.0f, -50.0f,   0.0f, 0.0f, 1.0f,
-        -50.0f,  50.0f, -50.0f,   0.0f, 0.0f, 1.0f,
-
-        -50.0f, -50.0f,  50.0f,   0.0f, 0.0f, -1.0f,
-        -50.0f, -50.0f, -50.0f,   0.0f, 0.0f, -1.0f,
-        -50.0f,  50.0f, -50.0f,   0.0f, 0.0f, -1.0f,
-        -50.0f,  50.0f, -50.0f,   0.0f, 0.0f, -1.0f,
-        -50.0f,  50.0f,  50.0f,   0.0f, 0.0f, -1.0f,
-        -50.0f, -50.0f,  50.0f,   0.0f, 0.0f, -1.0f,
-
-         50.0f, -50.0f, -50.0f,   -1.0f, 0.0f, 0.0f,
-         50.0f, -50.0f,  50.0f,   -1.0f, 0.0f, 0.0f,
-         50.0f,  50.0f,  50.0f,   -1.0f, 0.0f, 0.0f,
-         50.0f,  50.0f,  50.0f,   -1.0f, 0.0f, 0.0f,
-         50.0f,  50.0f, -50.0f,   -1.0f, 0.0f, 0.0f,
-         50.0f, -50.0f, -50.0f,   -1.0f, 0.0f, 0.0f,
-
-        -50.0f, -50.0f, -50.0f,   1.0f, 0.0f, 0.0f,
-        -50.0f, -50.0f, -50.0f,   1.0f, 0.0f, 0.0f,
-         50.0f, -50.0f, -50.0f,   1.0f, 0.0f, 0.0f,
-         50.0f, -50.0f, -50.0f,   1.0f, 0.0f, 0.0f,
-         50.0f, -50.0f,  50.0f,   1.0f, 0.0f, 0.0f,
-        -50.0f, -50.0f,  50.0f,   1.0f, 0.0f, 0.0f,
-
-        -50.0f,  50.0f, -50.0f,   0.0f, 1.0f, 0.0f,
-        -50.0f,  50.0f,  50.0f,   0.0f, 1.0f, 0.0f,
-         50.0f,  50.0f,  50.0f,   0.0f, 1.0f, 0.0f,
-         50.0f,  50.0f,  50.0f,   0.0f, 1.0f, 0.0f,
-         50.0f,  50.0f, -50.0f,   0.0f, 1.0f, 0.0f,
-        -50.0f,  50.0f, -50.0f,   0.0f, 1.0f, 0.0f
-    };
-
-    unsigned int VAO, VBO;
-    glGenVertexArrays(1, &VAO);
-    glGenBuffers(1, &VBO);
-
-    glBindVertexArray(VAO);
-    glBindBuffer(GL_ARRAY_BUFFER, VBO);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
-
-    // Position attribute
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)0);
-    glEnableVertexAttribArray(0);
-    // Normal attribute
-    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)(3 * sizeof(float)));
-    glEnableVertexAttribArray(1);
-
-    return VAO;
-}
-
-void renderStudent(unsigned int shader, Student& student, float time) {
-    // Calculate student position on the track
-    float xPos = -TOTAL_WIDTH / 2.0f + student.trackNumber * (TRACK_WIDTH + TRACK_SPACING) + TRACK_WIDTH / 2.0f;
-    float zPos = student.position;
-    
-    // Animation parameters
-    float runningSpeed = student.speed * 10.0f; // Scale for animation
-    float armSwing = sin(time * runningSpeed + student.armPhase) * 0.5f;
-    float legSwing = sin(time * runningSpeed + student.legPhase) * 0.5f;
-    
-    // Set shader uniforms
-    glUseProgram(shader);
-    glUniform3fv(glGetUniformLocation(shader, "objectColor"), 1, glm::value_ptr(student.color));
-    
-    // Draw torso
-    glm::mat4 model = glm::mat4(1.0f);
-    model = glm::translate(model, glm::vec3(xPos, 1.0f, zPos));
-    model = glm::scale(model, glm::vec3(0.3f, 0.5f, 0.2f));
-    glUniformMatrix4fv(glGetUniformLocation(shader, "model"), 1, GL_FALSE, glm::value_ptr(model));
-    drawCube();
-    
-    // Draw head
-    model = glm::mat4(1.0f);
-    model = glm::translate(model, glm::vec3(xPos, 1.7f, zPos));
-    model = glm::scale(model, glm::vec3(0.2f, 0.2f, 0.2f));
-    glUniformMatrix4fv(glGetUniformLocation(shader, "model"), 1, GL_FALSE, glm::value_ptr(model));
-    drawCube();
-    
-    // Draw right arm
-    model = glm::mat4(1.0f);
-    model = glm::translate(model, glm::vec3(xPos + 0.25f, 1.1f, zPos));
-    model = glm::rotate(model, armSwing, glm::vec3(1.0f, 0.0f, 0.0f));
-    model = glm::translate(model, glm::vec3(0.0f, -0.25f, 0.0f));
-    model = glm::scale(model, glm::vec3(0.1f, 0.5f, 0.1f));
-    glUniformMatrix4fv(glGetUniformLocation(shader, "model"), 1, GL_FALSE, glm::value_ptr(model));
-    drawCube();
-    
-    // Draw left arm
-    model = glm::mat4(1.0f);
-    model = glm::translate(model, glm::vec3(xPos - 0.25f, 1.1f, zPos));
-    model = glm::rotate(model, -armSwing, glm::vec3(1.0f, 0.0f, 0.0f));
-    model = glm::translate(model, glm::vec3(0.0f, -0.25f, 0.0f));
-    model = glm::scale(model, glm::vec3(0.1f, 0.5f, 0.1f));
-    glUniformMatrix4fv(glGetUniformLocation(shader, "model"), 1, GL_FALSE, glm::value_ptr(model));
-    drawCube();
-    
-    // Draw right leg
-    model = glm::mat4(1.0f);
-    model = glm::translate(model, glm::vec3(xPos + 0.1f, 0.5f, zPos));
-    model = glm::rotate(model, legSwing, glm::vec3(1.0f, 0.0f, 0.0f));
-    model = glm::translate(model, glm::vec3(0.0f, -0.25f, 0.0f));
-    model = glm::scale(model, glm::vec3(0.1f, 0.5f, 0.1f));
-    glUniformMatrix4fv(glGetUniformLocation(shader, "model"), 1, GL_FALSE, glm::value_ptr(model));
-    drawCube();
-    
-    // Draw left leg
-    model = glm::mat4(1.0f);
-    model = glm::translate(model, glm::vec3(xPos - 0.1f, 0.5f, zPos));
-    model = glm::rotate(model, -legSwing, glm::vec3(1.0f, 0.0f, 0.0f));
-    model = glm::translate(model, glm::vec3(0.0f, -0.25f, 0.0f));
-    model = glm::scale(model, glm::vec3(0.1f, 0.5f, 0.1f));
-    glUniformMatrix4fv(glGetUniformLocation(shader, "model"), 1, GL_FALSE, glm::value_ptr(model));
-    drawCube();
-}
-
-void initializeStudents(std::vector<Student>& students) {
-    // Names for students (example names)
-    std::vector<std::string> names = {
-        "Alex", "Ben", "Charlie", "David", "Emma", "Frank", "Grace", "Hannah",
-        "Ian", "Jack", "Kate", "Liam", "Mia", "Noah", "Olivia", "Peter",
-        "Quinn", "Ryan", "Sarah", "Tom", "Uma", "Victor", "Wendy", "Xander",
-        "Yara", "Zack", "Amy", "Bob", "Chloe", "Dan", "Eve", "Finn"
-    };
-    
-    // Assign students to tracks
-    for (int i = 0; i < NUM_STUDENTS; i++) {
-        students[i].name = names[i % names.size()];
-        students[i].trackNumber = i % NUM_TRACKS;
-        students[i].position = TRACK_LENGTH / 2.0f - (i / NUM_TRACKS) * 2.0f; // Stagger positions
-        students[i].speed = 2.0f + static_cast<float>(rand()) / (static_cast<float>(RAND_MAX / 2.0f)); // Random speed between 2 and 4
-        students[i].armPhase = static_cast<float>(rand()) / static_cast<float>(RAND_MAX) * 2.0f * 3.14159f; // Random phase
-        students[i].legPhase = students[i].armPhase + 3.14159f; // Opposite phase to arms
-        
-        // Random color
-        float r = 0.3f + static_cast<float>(rand()) / (static_cast<float>(RAND_MAX / 0.7f));
-        float g = 0.3f + static_cast<float>(rand()) / (static_cast<float>(RAND_MAX / 0.7f));
-        float b = 0.3f + static_cast<float>(rand()) / (static_cast<float>(RAND_MAX / 0.7f));
-        students[i].color = glm::vec3(r, g, b);
-        
-        students[i].finishTime = 0.0f;
-        students[i].finished = false;
-    }
-}
-
-void drawCube() {
-    // Cube vertices
-    float vertices[] = {
-        // positions          // normals
-        -0.5f, -0.5f, -0.5f,  0.0f,  0.0f, -1.0f,
-         0.5f, -0.5f, -0.5f,  0.0f,  0.0f, -1.0f,
-         0.5f,  0.5f, -0.5f,  0.0f,  0.0f, -1.0f,
-         0.5f,  0.5f, -0.5f,  0.0f,  0.0f, -1.0f,
-        -0.5f,  0.5f, -0.5f,  0.0f,  0.0f, -1.0f,
-        -0.5f, -0.5f, -0.5f,  0.0f,  0.0f, -1.0f,
-
-        -0.5f, -0.5f,  0.5f,  0.0f,  0.0f,  1.0f,
-         0.5f, -0.5f,  0.5f,  0.0f,  0.0f,  1.0f,
-         0.5f,  0.5f,  0.5f,  0.0f,  0.0f,  1.0f,
-         0.5f,  0.5f,  0.5f,  0.0f,  0.0f,  1.0f,
-        -0.5f,  0.5f,  0.5f,  0.0f,  0.0f,  1.0f,
-        -0.5f, -0.5f,  0.5f,  0.0f,  0.0f,  1.0f,
-
-        -0.5f,  0.5f,  0.5f, -1.0f,  0.0f,  0.0f,
-        -0.5f,  0.5f, -0.5f, -1.0f,  0.0f,  0.0f,
-        -0.5f, -0.5f, -0.5f, -1.0f,  0.0f,  0.0f,
-        -0.5f, -0.5f, -0.5f, -1.0f,  0.0f,  0.0f,
-        -0.5f, -0.5f,  0.5f, -1.0f,  0.0f,  0.0f,
-        -0.5f,  0.5f,  0.5f, -1.0f,  0.0f,  0.0f,
-
-         0.5f,  0.5f,  0.5f,  1.0f,  0.0f,  0.0f,
-         0.5f,  0.5f, -0.5f,  1.0f,  0.0f,  0.0f,
-         0.5f, -0.5f, -0.5f,  1.0f,  0.0f,  0.0f,
-         0.5f, -0.5f, -0.5f,  1.0f,  0.0f,  0.0f,
-         0.5f, -0.5f,  0.5f,  1.0f,  0.0f,  0.0f,
-         0.5f,  0.5f,  0.5f,  1.0f,  0.0f,  0.0f,
-
-        -0.5f, -0.5f, -0.5f,  0.0f, -1.0f,  0.0f,
-         0.5f, -0.5f, -0.5f,  0.0f, -1.0f,  0.0f,
-         0.5f, -0.5f,  0.5f,  0.0f, -1.0f,  0.0f,
-         0.5f, -0.5f,  0.5f,  0.0f, -1.0f,  0.0f,
-        -0.5f, -0.5f,  0.5f,  0.0f, -1.0f,  0.0f,
-        -0.5f, -0.5f, -0.5f,  0.0f, -1.0f,  0.0f,
-
-        -0.5f,  0.5f, -0.5f,  0.0f,  1.0f,  0.0f,
-         0.5f,  0.5f, -0.5f,  0.0f,  1.0f,  0.0f,
-         0.5f,  0.5f,  0.5f,  0.0f,  1.0f,  0.0f,
-         0.5f,  0.5f,  0.5f,  0.0f,  1.0f,  0.0f,
-        -0.5f,  0.5f,  0.5f,  0.0f,  1.0f,  0.0f,
-        -0.5f,  0.5f, -0.5f,  0.0f,  1.0f,  0.0f
-    };
-    
-    // Create and bind VAO and VBO
-    unsigned int VAO, VBO;
-    glGenVertexArrays(1, &VAO);
-    glGenBuffers(1, &VBO);
-    
-    glBindVertexArray(VAO);
-    glBindBuffer(GL_ARRAY_BUFFER, VBO);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
-    
-    // Position attribute
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)0);
-    glEnableVertexAttribArray(0);
-    // Normal attribute
-    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)(3 * sizeof(float)));
-    glEnableVertexAttribArray(1);
-    
-    // Draw cube
-    glDrawArrays(GL_TRIANGLES, 0, 36);
-    
-    // Clean up
-    glDeleteVertexArrays(1, &VAO);
-    glDeleteBuffers(1, &VBO);
-}
 
 
 
