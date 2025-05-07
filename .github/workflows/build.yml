@@ -1,0 +1,43 @@
+name: Build OpenGL Project
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: windows-latest
+    
+    steps:
+    - uses: actions/checkout@v2
+    
+    - name: Set up MinGW
+      uses: egor-tensin/setup-mingw@v2
+      with:
+        platform: x64
+    
+    - name: Install GLFW
+      run: |
+        mkdir -p C:/temp
+        cd C:/temp
+        curl -L -o glfw.zip https://github.com/glfw/glfw/releases/download/3.3.8/glfw-3.3.8.bin.WIN64.zip
+        unzip glfw.zip
+        mkdir -p C:/GLFW
+        cp -r glfw-3.3.8.bin.WIN64/* C:/GLFW/
+    
+    - name: Build with CMake
+      run: |
+        mkdir build
+        cd build
+        cmake -G "MinGW Makefiles" ..
+        cmake --build .
+    
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v2
+      with:
+        name: OpenGL-Project-Build
+        path: |
+          build/*.exe
+          exclude: build/_deps/**/*

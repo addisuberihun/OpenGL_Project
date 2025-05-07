@@ -1,0 +1,5 @@
+# For Windows with MinGW:
+g++ naturalphenomena.cpp src/glad.c -o naturalphenomena -I./include -lglfw3 -lopengl32 -lgdi32
+
+# Then run:
+naturalphenomena.exe

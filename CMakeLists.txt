@@ -19,15 +19,44 @@ if(glm_FOUND)
     include_directories(${GLM_INCLUDE_DIRS})
 endif()
 
-# Add executable
+# Add executables
 add_executable(${PROJECT_NAME} 
     main.cpp
     src/glad.c
     src/shader.cpp
 )
 
-# Link libraries
+# Add the 2D game executable
+add_executable(Game2D
+    game2D.cpp
+    src/glad.c
+    src/shader.cpp
+)
+
+# Add the 3D scene executable
+add_executable(scene3D
+    scene3D.cpp
+    src/glad.c
+)
+
+# Link libraries for main project
 target_link_libraries(${PROJECT_NAME}
+    ${OPENGL_LIBRARIES}
+    glfw3
+    opengl32
+    gdi32
+)
+
+# Link libraries for 2D game
+target_link_libraries(Game2D
+    ${OPENGL_LIBRARIES}
+    glfw3
+    opengl32
+    gdi32
+)
+
+# Link libraries for 3D scene
+target_link_libraries(scene3D
     ${OPENGL_LIBRARIES}
     glfw3
     opengl32
@@ -38,5 +67,8 @@ target_link_libraries(${PROJECT_NAME}
 set_target_properties(${PROJECT_NAME} PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}
 )
+
+
+
 
 
